@@ -117,6 +117,8 @@ class MainWindow(QMainWindow):
         self.run: RunResult | None = None
         self.events: list = []
         self.source_kind = ""
+        self.worker2 = None                 # 2e caméra simultanée
+        self.cam2_label = ""
         self.source_arg = None
         self.last_stats: dict = {}
         self.plot_hist: list[tuple[float, dict]] = []
@@ -172,7 +174,10 @@ class MainWindow(QMainWindow):
         self.a_demo = act("Démonstration", lambda: self.start_source("demo"), "Ctrl+D",
                           "Chambre de Wilson simulée en temps réel (sans matériel)", icon="flask")
         self.a_pause = act("Pause", self.toggle_pause, "Space", "Pause / reprise", icon="pause")
-        self.a_stop = act("Arrêter", self.stop_source, "Ctrl+.", "Terminer l'enregistrement et calculer les résultats",
+        self.a_cam2 = act("2e caméra", self.toggle_cam2, "Ctrl+Shift+2",
+                          "Filmer avec une 2e caméra en même temps (ex. : C930e + iPhone), chacune avec sa détection",
+                          checkable=True, icon="images")
+        self.a_stop = act("Arrêter", self.stop_all, "Ctrl+.", "Terminer l'enregistrement et calculer les résultats",
                           icon="stop")
         self.a_record = act("Enregistrer la vidéo", self.toggle_record, "R",
                             "Enregistrer la vidéo brute (MP4) pendant l'analyse", checkable=True, icon="record")
@@ -279,6 +284,7 @@ class MainWindow(QMainWindow):
         # ---- en-tête vert forêt : logo, nom, menus et actions essentielles ----------------
         self.header = BrandHeader(mb, [
             (self.a_home, "home"), (self.a_camera, "camera"), (self.a_switch_cam, "swap", "Changer"),
+            (self.a_cam2, "images", "2 caméras"),
             (self.a_video, "video"), None,
             (self.a_pause, "pause"), (self.a_stop, "stop"), None,
             (self.a_record, "record", "Enregistrer"), (self.a_snap, "photo"), None,
@@ -350,7 +356,27 @@ class MainWindow(QMainWindow):
         self.video = VideoView()
         self.video.roi_defined.connect(self.set_roi)
         self.video.calib_defined.connect(self.set_calibration)
-        ll.addWidget(self.video, 1)
+        # 2e caméra simultanée : seconde image côte à côte, avec sa propre détection
+        self.video_split = QSplitter(Qt.Orientation.Horizontal)
+        self.video_split.setChildrenCollapsible(False)
+        self.video_split.addWidget(self.video)
+        cam2_box = QWidget()
+        c2 = QVBoxLayout(cam2_box)
+        c2.setContentsMargins(0, 0, 0, 0)
+        c2.setSpacing(4)
+        self.cam2_title = QLabel("Caméra 2")
+        self.cam2_title.setStyleSheet(f"color:{B.FOREST}; font-weight:700; padding: 0 4px;")
+        self.video2 = VideoView()
+        self.cam2_info = QLabel("")
+        self.cam2_info.setStyleSheet(f"color:{B.MUTED}; font-size:12px; padding: 0 4px;")
+        self.cam2_info.setWordWrap(True)
+        c2.addWidget(self.cam2_title)
+        c2.addWidget(self.video2, 1)
+        c2.addWidget(self.cam2_info)
+        self.video_split.addWidget(cam2_box)
+        self.cam2_box = cam2_box
+        cam2_box.hide()
+        ll.addWidget(self.video_split, 1)
         self.progress = QProgressBar()
         self.progress.setTextVisible(True)
         self.progress.setMaximumHeight(16)
@@ -851,6 +877,98 @@ class MainWindow(QMainWindow):
         self.panel.camera.setCurrentIndex(j)
         self.start_source("camera")
 
+    # ==================================================== 2e caméra ==
+    def toggle_cam2(self, checked: bool):
+        if not checked:
+            self.stop_cam2()
+            return
+        cams = [c for c in self.settings.get("cameras_cache", []) if isinstance(c, dict) and "index" in c]
+        if len(cams) < 2:
+            self._refresh_cameras(quick=False)
+            cams = [c for c in self.settings.get("cameras_cache", []) if isinstance(c, dict) and "index" in c]
+        main_idx = self.panel.camera_settings()["index"]
+        if self.worker is not None and self.source_kind == "camera" and self.source_arg is not None:
+            main_idx = int(self.source_arg)
+        others = [c for c in cams if int(c["index"]) != int(main_idx)]
+        if not others:
+            self.a_cam2.setChecked(False)
+            QMessageBox.information(self, "2e caméra", "Il faut au moins deux caméras branchées (ex. : la Logitech "
+                                    "C930e et l'iPhone en Caméra de continuité). Branchez-la, puis réessayez.")
+            return
+        # Choix proposé : l'iPhone si la caméra principale n'en est pas un, sinon la première autre caméra
+        others.sort(key=lambda c: (not c.get("phone"), int(c["index"])))
+        names = [str(c.get("label") or f"Caméra {c['index']}") for c in others]
+        name, ok = QInputDialog.getItem(self, "2e caméra", "Caméra à utiliser en même temps :", names, 0, False)
+        if not ok:
+            self.a_cam2.setChecked(False)
+            return
+        cam = others[names.index(name)]
+        # La caméra principale démarre aussi si elle ne tourne pas encore
+        if self.worker is None:
+            self.start_source("camera")
+        self.start_cam2(cam)
+
+    def start_cam2(self, cam: dict):
+        self.stop_cam2(save=False)
+        idx = int(cam["index"])
+        w = int(cam.get("width") or 1280)
+        h = int(cam.get("height") or 720)
+        set_ = self.panel.camera_settings()
+        fps, backend = set_["fps"], set_["backend"]
+        self.cam2_label = str(cam.get("name") or cam.get("label") or f"Caméra {idx}")
+        cfg = self.panel.apply_to(self.cfg).copy()
+        factory = lambda: CameraSource(idx, w, h, fps, backend)  # noqa: E731
+        self.worker2 = ProcessingWorker(factory, cfg, f"camera:{idx} ({self.cam2_label})")
+        self.worker2.view_mode = self.view_mode.currentData()
+        self.worker2.frame_ready.connect(self._on_frame2)
+        self.worker2.run_finished.connect(self._on_cam2_finished)
+        self.worker2.error.connect(lambda m: QMessageBox.warning(self, "2e caméra", m))
+        self.worker2.info.connect(lambda m: self.cam2_info.setText(m))
+        self.worker2.finished.connect(self._on_cam2_done)
+        self.cam2_title.setText(f"Caméra 2 — {self.cam2_label}")
+        self.cam2_info.setText("Ouverture de la caméra…")
+        self.cam2_box.show()
+        self.video_split.setSizes([1, 1])
+        self.worker2.start()
+        self.a_cam2.setChecked(True)
+        self._update_actions()
+        self.tabs.setCurrentWidget(self.tab_live)
+        self.statusBar().showMessage(f"2e caméra : {self.cam2_label} — apprentissage du fond…", 6000)
+
+    def stop_cam2(self, save: bool = True):
+        w = self.worker2
+        if w is None:
+            return
+        self._cam2_save = save
+        w.stop()
+        self.cam2_info.setText("Arrêt… calcul des résultats de la caméra 2.")
+
+    def _on_frame2(self, qimg: QImage, st: dict):
+        try:
+            self.video2.set_image(qimg, st.get("native_wh"))
+            counts = ", ".join(f"{physics.CLASS_INFO.get(c, {}).get('symbole', c)} {n}"
+                               for c, n in (st.get("counts") or {}).items() if n) or "aucune trace pour l'instant"
+            state = "apprentissage du fond…" if st.get("warming") else "détection active"
+            self.cam2_info.setText(f"{counts} | {st.get('proc_fps', 0):.0f} img/s | {state}")
+        finally:
+            w = self.worker2
+            if w is not None:
+                w.frame_consumed()
+
+    def _on_cam2_finished(self, run):
+        if getattr(self, "_cam2_save", True) and run is not None and run.total > 0:
+            try:
+                run.name = f"{run.name} — caméra 2 ({self.cam2_label})"
+            except Exception:
+                pass
+            self._save_run(run, quiet=True)
+
+    def _on_cam2_done(self):
+        self.worker2 = None
+        self.a_cam2.setChecked(False)
+        self.cam2_box.hide()
+        self._update_actions()
+
     # ================================================== changer de caméra ==
     def switch_camera(self):
         """Passe à la caméra suivante, comme le bouton de FaceTime (Mac ↔ iPhone ↔ webcam USB).
@@ -874,6 +992,12 @@ class MainWindow(QMainWindow):
                 "Un câble USB fonctionne aussi. Cliquez ensuite à nouveau sur « Changer de caméra ».")
             return
         cur = self.panel.camera_settings()["index"]
+        w2 = self.worker2
+        if w2 is not None:
+            used = str(w2.source_name).split(":")[1].split(" ")[0] if ":" in str(w2.source_name) else ""
+            cams = [c for c in cams if str(c["index"]) != used or int(c["index"]) == int(cur)]
+        if not cams:
+            return
         order = [int(c["index"]) for c in cams]
         nxt = cams[(order.index(cur) + 1) % len(cams)] if cur in order else cams[0]
         label = nxt.get("name") or nxt.get("label") or f"Caméra {nxt['index']}"
@@ -1043,6 +1167,11 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Port série", f"Impossible d'ouvrir {ex.serial_port} : {e}")
 
+    def stop_all(self, *_):
+        """Bouton « Arrêter » : arrête la caméra principale et la 2e caméra."""
+        self.stop_cam2()
+        self.stop_source()
+
     def stop_source(self, wait: bool = False):
         if self.worker is None:
             return
@@ -1092,8 +1221,9 @@ class MainWindow(QMainWindow):
 
     def _update_actions(self):
         running = self.worker is not None
-        for a in (self.a_pause, self.a_stop, self.a_record, self.a_snap):
+        for a in (self.a_pause, self.a_record, self.a_snap):
             a.setEnabled(running)
+        self.a_stop.setEnabled(running or self.worker2 is not None)
         self.a_trigger.setEnabled(running and self.cfg.expansion.enabled)
 
     # ========================================================= callbacks ====
@@ -1492,6 +1622,16 @@ class MainWindow(QMainWindow):
             if not quiet:
                 QMessageBox.information(self, "Sauvegarde", "Terminez d'abord l'enregistrement (bouton « Arrêter »).")
             return None
+        return self._save_run(self.run, quiet)
+
+    def _save_run(self, run, quiet: bool = False):
+        saved, self.run = self.run, run      # le code de sauvegarde travaille sur self.run
+        try:
+            return self._save_current_run(quiet)
+        finally:
+            self.run = saved
+
+    def _save_current_run(self, quiet: bool):
         try:
             if not self.run.folder:
                 base = self._out_dir()
@@ -2044,6 +2184,9 @@ class MainWindow(QMainWindow):
                           "statistiques de Poisson. Second avis optionnel : Claude Opus 5.5 (Anthropic).</p>")
 
     def closeEvent(self, ev):
+        if self.worker2 is not None:
+            self.worker2.stop()
+            self.worker2.wait(15000)
         if self.worker is not None:
             self.worker.stop()
             self.worker.wait(15000)
