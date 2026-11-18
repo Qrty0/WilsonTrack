@@ -433,7 +433,7 @@ def run_gui(argv=None) -> int:
     step("Prêt", 1.0)
     if splash is not None:
         try:
-            splash.finish(w, min_total_s=1.9)
+            splash.finish(w)
         except Exception:
             w.show()
     else:

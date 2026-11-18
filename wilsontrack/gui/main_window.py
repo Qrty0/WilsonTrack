@@ -1068,6 +1068,14 @@ class MainWindow(QMainWindow):
             self.worker.show_labels = self.labels_chk.isChecked()
 
     def _on_frame(self, qimg: QImage, st: dict):
+        try:
+            self._show_frame(qimg, st)
+        finally:
+            w = self.worker
+            if w is not None:
+                w.frame_consumed()
+
+    def _show_frame(self, qimg: QImage, st: dict):
         self.last_stats = st
         self.video.set_image(qimg, st.get("native_wh"))
         self.counters.update_counts(st["counts"], st["duration_s"])

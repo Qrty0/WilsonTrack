@@ -122,6 +122,18 @@ class ProcessingWorker(QThread):
         self._stop_reason = ""
         self._spill_dir = None
         self._counts_cache: tuple[float, int, dict] = (0.0, -1, {})
+        # Contre-pression vers l'interface : on n'envoie une nouvelle image que lorsque la
+        # précédente a été affichée. Sinon, si l'écran est plus lent que la caméra (Mac Retina…),
+        # les images s'empilent dans la file Qt et l'application gèle en dévorant la mémoire.
+        self._ui_pending_since: float | None = None
+
+    def frame_consumed(self):
+        """Appelé par l'interface quand l'image envoyée a été affichée."""
+        self._ui_pending_since = None
+
+    def _ui_ready(self, now: float) -> bool:
+        p = self._ui_pending_since
+        return p is None or now - p > 2.0  # filet de sécurité si l'accusé se perd
 
     # ------------------------------------------------------------ commandes --
     def stop(self):
@@ -407,10 +419,11 @@ class ProcessingWorker(QThread):
                         pass
             # Affichage limité à ~25 images/s (et plus rarement en analyse rapide de fichier)
             min_gap = 0.04 if (live or self.realtime_file) else 0.12
-            if now - last_emit >= min_gap or res.finished:
+            if (now - last_emit >= min_gap or res.finished) and self._ui_ready(now):
                 last_emit = now
                 img = self._render(frame, res, det)
                 stats = self._stats(det, res, src, fps_hist, now - t_start)
+                self._ui_pending_since = now
                 self.frame_ready.emit(bgr_to_qimage(img), stats)
             if self.realtime_file and not live:
                 target = 1.0 / max(src.fps, 1.0)
