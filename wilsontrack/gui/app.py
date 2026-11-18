@@ -439,7 +439,24 @@ def run_gui(argv=None) -> int:
     else:
         w.show()
     rc = app.exec()
-    if getattr(w, "unclean_exit", False):
+    # Aucun fil ne doit survivre à la fermeture : sinon Qt arrête brutalement l'application (SIGABRT)
+    # pendant le nettoyage de Python. On demande l'arrêt, on attend un peu, puis on sort directement.
+    from .worker import running_threads
+    busy = running_threads()
+    for t in busy:
+        if hasattr(t, "stop"):
+            try:
+                t.stop()
+            except Exception:
+                pass
+    for t in busy:
+        t.wait(5000)
+    if running_threads() or getattr(w, "unclean_exit", False):
+        try:
+            from ..analysis.run import _cleanup_spill_dirs
+            _cleanup_spill_dirs()
+        except Exception:
+            pass
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(rc)

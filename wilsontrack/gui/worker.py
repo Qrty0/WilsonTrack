@@ -83,6 +83,26 @@ def _false_color(img: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return cv2.applyColorMap(v, cv2.COLORMAP_INFERNO)
 
 
+# Références fortes vers tous les fils : un QThread détruit pendant qu'il tourne fait planter
+# l'application entière (« QThread: Destroyed while thread is still running » → SIGABRT). Cela arrivait
+# quand l'interface lâchait son dernier pointeur vers un traitement encore en train de finir.
+# On garde donc chaque fil ici jusqu'à ce qu'il soit complètement terminé (reap_threads).
+_THREADS: list = []
+
+
+def _keep(thread):
+    _THREADS.append(thread)
+
+
+def reap_threads():
+    """Libère les fils complètement terminés (à appeler depuis le fil de l'interface)."""
+    _THREADS[:] = [t for t in _THREADS if not t.isFinished()]
+
+
+def running_threads() -> list:
+    return [t for t in _THREADS if t.isRunning()]
+
+
 class ProcessingWorker(QThread):
     frame_ready = Signal(object, dict)       # QImage, statistiques
     track_finished = Signal(object)          # TrackEvent
@@ -98,6 +118,7 @@ class ProcessingWorker(QThread):
                  display_max_w: int = 1280, session: NightSessionConfig | dict | None = None,
                  session_folder: str = ""):
         super().__init__()
+        _keep(self)
         self.source_factory = source_factory
         self.cfg = cfg.copy()
         self.source_name = source_name
@@ -456,8 +477,8 @@ class ProcessingWorker(QThread):
                         limit_memory(det, self._spill_dir)
                     except Exception:
                         pass
-            # Affichage limité à ~25 images/s (et plus rarement en analyse rapide de fichier)
-            min_gap = 0.04 if (live or self.realtime_file) else 0.12
+            # Affichage limité à ~30 images/s (et plus rarement en analyse rapide de fichier)
+            min_gap = 1.0 / 30 if (live or self.realtime_file) else 0.12
             if (now - last_emit >= min_gap or res.finished) and self._ui_ready(now):
                 last_emit = now
                 img = self._render(frame, res, det)
@@ -532,6 +553,7 @@ class CallWorker(QThread):
 
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
+        _keep(self)
         self.fn, self.args, self.kwargs = fn, args, kwargs
 
     def run(self):

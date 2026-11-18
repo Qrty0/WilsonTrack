@@ -1,6 +1,7 @@
 """Widgets réutilisables : vue vidéo interactive, compteurs, graphiques matplotlib."""
 from __future__ import annotations
 
+import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
@@ -20,7 +21,40 @@ def bgr_to_qimage(img: np.ndarray) -> QImage:
         h, w = img.shape
         return QImage(img.data, w, h, img.strides[0], QImage.Format.Format_Grayscale8).copy()
     h, w, _ = img.shape
-    return QImage(img.data, w, h, img.strides[0], QImage.Format.Format_BGR888).copy()
+    # Format 32 bits natif (BGRA en mémoire = RGB32) : Qt l'affiche sans conversion à chaque dessin,
+    # ce qui rend la vidéo bien plus fluide (surtout sur écran Retina et avec deux caméras).
+    bgra = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+    return QImage(bgra.data, w, h, bgra.strides[0], QImage.Format.Format_RGB32).copy()
+
+
+class FullscreenVideo(QWidget):
+    """Une caméra en plein écran ; double-clic ou Échap pour revenir."""
+    closed = Signal()
+
+    def __init__(self, title: str):
+        super().__init__(None, Qt.WindowType.Window)
+        self.setWindowTitle(title)
+        self.setStyleSheet("background:#000;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.view = VideoView()
+        self.view.fullscreen_requested.connect(self.close)
+        lay.addWidget(self.view)
+        self.hint = QLabel(f"{title}   ·   double-clic ou Échap pour quitter le plein écran", self)
+        self.hint.setStyleSheet("color: rgba(255,255,255,0.85); background: rgba(0,0,0,0.45); "
+                                "padding: 6px 12px; border-radius: 8px; font-size: 13px;")
+        self.hint.adjustSize()
+        self.hint.move(16, 16)
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key.Key_Escape, Qt.Key.Key_F):
+            self.close()
+        else:
+            super().keyPressEvent(ev)
+
+    def closeEvent(self, ev):
+        self.closed.emit()
+        super().closeEvent(ev)
 
 
 class VideoView(QWidget):
@@ -38,6 +72,7 @@ class VideoView(QWidget):
     calib_defined = Signal(float)       # distance en px de l'image native
     point_clicked = Signal(float, float)
     mode_finished = Signal()
+    fullscreen_requested = Signal()     # double-clic hors mode de dessin : image en plein écran
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -172,6 +207,8 @@ class VideoView(QWidget):
             self.set_mode("none")
             self.roi_defined.emit(pts)
             self.mode_finished.emit()
+        elif self.mode == "none":
+            self.fullscreen_requested.emit()
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Escape and self.mode != "none":

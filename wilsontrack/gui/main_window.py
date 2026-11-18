@@ -36,8 +36,8 @@ from .home import HomePage, VideoSetupDialog
 from .learning import LearningCenter
 from .session_dialogs import BatchQueueWidget, SessionStatusBar
 from .settings_panel import SettingsPanel
-from .widgets import Callout, CounterPanel, MplCanvas, VideoView, bgr_to_qimage
-from .worker import VIEW_MODES, CallWorker, ProcessingWorker, SynthSource
+from .widgets import Callout, CounterPanel, FullscreenVideo, MplCanvas, VideoView, bgr_to_qimage
+from .worker import VIEW_MODES, CallWorker, ProcessingWorker, SynthSource, reap_threads
 
 CLASS_ORDER = ["alpha", "beta", "muon", "proton", "fine", "incertain"]
 MANUAL_CHOICES = ["(automatique)", "alpha", "beta", "muon", "proton", "fine", "incertain", "artefact"]
@@ -118,6 +118,8 @@ class MainWindow(QMainWindow):
         self.events: list = []
         self.source_kind = ""
         self.worker2 = None                 # 2e caméra simultanée
+        self.cam2_index = None
+        self._fs = None                     # (n° d'image, fenêtre plein écran) ou None
         self.cam2_label = ""
         self.source_arg = None
         self.last_stats: dict = {}
@@ -141,6 +143,9 @@ class MainWindow(QMainWindow):
                 self.restoreGeometry(bytes.fromhex(geo))
             except Exception:
                 pass
+        self._reaper = QTimer(self, interval=3000)
+        self._reaper.timeout.connect(reap_threads)
+        self._reaper.start()
         self._cfg_timer = QTimer(self, singleShot=True, interval=350)
         self._cfg_timer.timeout.connect(self._apply_settings)
         self.panel.changed.connect(self._cfg_timer.start)
@@ -354,6 +359,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.session_bar)
         ll.addWidget(bar_card)
         self.video = VideoView()
+        self.video.fullscreen_requested.connect(lambda: self._toggle_fullscreen(1))
         self.video.roi_defined.connect(self.set_roi)
         self.video.calib_defined.connect(self.set_calibration)
         # 2e caméra simultanée : seconde image côte à côte, avec sa propre détection
@@ -363,9 +369,8 @@ class MainWindow(QMainWindow):
         c1 = QVBoxLayout(cam1_box)
         c1.setContentsMargins(0, 0, 0, 0)
         c1.setSpacing(4)
-        self.cam1_title = QLabel("Caméra 1")
-        self.cam1_title.setStyleSheet(f"color:{B.FOREST}; font-weight:700; padding: 0 4px;")
-        self.cam1_title.hide()               # visible seulement en mode 2 caméras
+        self.cam1_title, self.cam1_pick = self._camera_picker("Caméra 1", 1)
+        self.cam1_title.hide()               # visible quand la source est une caméra
         c1.addWidget(self.cam1_title)
         c1.addWidget(self.video, 1)
         self.video_split.addWidget(cam1_box)
@@ -373,9 +378,9 @@ class MainWindow(QMainWindow):
         c2 = QVBoxLayout(cam2_box)
         c2.setContentsMargins(0, 0, 0, 0)
         c2.setSpacing(4)
-        self.cam2_title = QLabel("Caméra 2")
-        self.cam2_title.setStyleSheet(f"color:{B.FOREST}; font-weight:700; padding: 0 4px;")
+        self.cam2_title, self.cam2_pick = self._camera_picker("Caméra 2", 2)
         self.video2 = VideoView()
+        self.video2.fullscreen_requested.connect(lambda: self._toggle_fullscreen(2))
         self.cam2_info = QLabel("")
         self.cam2_info.setStyleSheet(f"color:{B.MUTED}; font-size:12px; padding: 0 4px;")
         self.cam2_info.setWordWrap(True)
@@ -940,8 +945,8 @@ class MainWindow(QMainWindow):
         self.worker2.error.connect(lambda m: QMessageBox.warning(self, "2e caméra", m))
         self.worker2.info.connect(lambda m: self.cam2_info.setText(m))
         self.worker2.finished.connect(lambda wk2=wk2: self._on_cam2_done(wk2))
-        self.cam2_title.setText(f"Caméra 2 — {self.cam2_label}")
-        self.cam1_title.setText(f"Caméra 1 — {self._camera_name(self.panel.camera_settings()['index'])}")
+        self.cam2_index = idx
+        self._fill_pickers()
         self.cam1_title.show()
         self.cam2_info.setText("Ouverture de la caméra…")
         self.cam2_box.show()
@@ -969,6 +974,8 @@ class MainWindow(QMainWindow):
     def _on_frame2(self, qimg: QImage, st: dict):
         try:
             self.video2.set_image(qimg, st.get("native_wh"))
+            if self._fs is not None and self._fs[0] == 2:
+                self._fs[1].view.set_image(qimg, st.get("native_wh"))
             counts = ", ".join(f"{physics.CLASS_INFO.get(c, {}).get('symbole', c)} {n}"
                                for c, n in (st.get("counts") or {}).items() if n) or "aucune trace pour l'instant"
             state = "apprentissage du fond…" if st.get("warming") else "détection active"
@@ -993,7 +1000,9 @@ class MainWindow(QMainWindow):
         self.worker2 = None
         self.a_cam2.setChecked(False)
         self.cam2_box.hide()
-        self.cam1_title.hide()
+        self.cam2_index = None
+        if self.source_kind != "camera" or self.worker is None:
+            self.cam1_title.hide()
         self._update_actions()
 
     # ================================================== changer de caméra ==
@@ -1039,6 +1048,8 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.source_kind == "camera":
             req = self.panel.camera_settings()
             req["index"], req["label"] = int(nxt["index"]), str(label)
+            self.source_arg = int(nxt["index"])
+            self._fill_pickers()
             self.worker.send("switch_camera", req)
             self.statusBar().showMessage(f"Passage à {label}…", 6000)
         else:
@@ -1047,6 +1058,94 @@ class MainWindow(QMainWindow):
     def _on_camera_switched(self, index: int):
         self.source_arg = index
         self.settings.set("cam_index", int(index))
+        self._fill_pickers()
+
+    # ------------------------------------------- listes de caméras au-dessus des images --
+    def _toggle_fullscreen(self, slot: int):
+        """Double-clic sur une image : la caméra en plein écran (double-clic / Échap pour revenir)."""
+        if self._fs is not None:
+            self._fs[1].close()
+            return
+        src = self.video if slot == 1 else self.video2
+        if src.current_image() is None:
+            return
+        name = self._camera_name(self._current_cam_index(slot)) if self.source_kind == "camera" or slot == 2 \
+            else "Image en direct"
+        win = FullscreenVideo(f"Caméra {slot} — {name}")
+        win.view.set_image(src.current_image())
+        win.closed.connect(lambda: setattr(self, "_fs", None))
+        self._fs = (slot, win)
+        win.showFullScreen()
+
+    def _camera_picker(self, title: str, slot: int):
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(4, 0, 0, 0)
+        lay.setSpacing(8)
+        lab = QLabel(title)
+        lab.setStyleSheet(f"color:{B.FOREST}; font-weight:700;")
+        combo = QComboBox()
+        combo.setToolTip("Choisir la caméra de cette image (la détection continue)")
+        combo.setMinimumContentsLength(18)
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo.setMinimumWidth(240)            # le nom complet de la caméra reste lisible
+        combo.activated.connect(lambda _i, slot=slot, combo=combo: self._pick_camera(slot, combo.currentData()))
+        lay.addWidget(lab)
+        lay.addWidget(combo)
+        lay.addStretch(1)
+        return row, combo
+
+    def _current_cam_index(self, slot: int):
+        if slot == 2:
+            return getattr(self, "cam2_index", None)
+        if self.worker is not None and self.source_kind == "camera" and self.source_arg is not None:
+            return int(self.source_arg)
+        return int(self.panel.camera_settings()["index"])
+
+    def _fill_pickers(self):
+        cams = [c for c in self.settings.get("cameras_cache", []) if isinstance(c, dict) and "index" in c]
+        for slot, combo in ((1, self.cam1_pick), (2, self.cam2_pick)):
+            cur = self._current_cam_index(slot)
+            combo.blockSignals(True)
+            combo.clear()
+            for c in cams:
+                combo.addItem(str(c.get("name") or c.get("label") or f"Caméra {c['index']}"), int(c["index"]))
+            if cur is not None and combo.findData(int(cur)) < 0:
+                combo.addItem(self._camera_name(cur), int(cur))
+            if cur is not None:
+                combo.setCurrentIndex(combo.findData(int(cur)))
+            combo.blockSignals(False)
+
+    def _pick_camera(self, slot: int, index):
+        if index is None:
+            return
+        index = int(index)
+        other = self._current_cam_index(2 if slot == 1 else 1)
+        if other is not None and int(other) == index and (slot == 1 and self.worker2 is not None or slot == 2):
+            QMessageBox.information(self, "Caméras", f"{self._camera_name(index)} est déjà utilisée par l'autre "
+                                    "image. Choisissez une autre caméra (ou changez d'abord l'autre image).")
+            self._fill_pickers()
+            return
+        if index == self._current_cam_index(slot):
+            return
+        name = self._camera_name(index)
+        req = self.panel.camera_settings()
+        req["index"], req["label"] = index, name
+        if slot == 2:
+            if self.worker2 is not None:
+                self.cam2_index = index
+                self.cam2_label = name
+                self.worker2.send("switch_camera", req)
+        else:
+            j = self.panel.camera.findData(index)
+            if j >= 0:
+                self.panel.camera.setCurrentIndex(j)
+            self.settings.set("cam_index", index)
+            if self.worker is not None and self.source_kind == "camera":
+                self.worker.send("switch_camera", req)
+            else:
+                self.start_source("camera")
+        self.statusBar().showMessage(f"Caméra {slot} : passage à {name}…", 6000)
 
     def _video_defaults(self) -> dict:
         p = self.panel
@@ -1154,7 +1253,15 @@ class MainWindow(QMainWindow):
                 cfg.physics.px_per_mm = sc.px_per_mm
         else:
             return
-        self.source_kind, self.source_arg = kind, arg
+        self.source_kind, self.source_arg = kind, (cam["index"] if kind == "camera" else arg)
+        try:
+            if kind == "camera":
+                self._fill_pickers()
+                self.cam1_title.show()
+            elif self.worker2 is None:
+                self.cam1_title.hide()
+        except AttributeError:
+            pass
         self._reset_live()
         if session:
             sess = dict(session)
@@ -1291,6 +1398,8 @@ class MainWindow(QMainWindow):
     def _show_frame(self, qimg: QImage, st: dict):
         self.last_stats = st
         self.video.set_image(qimg, st.get("native_wh"))
+        if self._fs is not None and self._fs[0] == 1:
+            self._fs[1].view.set_image(qimg, st.get("native_wh"))
         self.counters.update_counts(st["counts"], st["duration_s"])
         if st.get("progress") is not None:
             self.progress.show()
@@ -2220,6 +2329,8 @@ class MainWindow(QMainWindow):
                           "statistiques de Poisson. Second avis optionnel : Claude Opus 5.5 (Anthropic).</p>")
 
     def closeEvent(self, ev):
+        if self._fs is not None:
+            self._fs[1].close()
         threads = [t for t in (self.worker2, self.worker, *getattr(self, "_zombies", [])) if t is not None]
         for t in threads:
             t.stop()
