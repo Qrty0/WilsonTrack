@@ -151,6 +151,10 @@ class ProcessingWorker(QThread):
         # Changement de caméra à chaud (Mac ↔ iPhone, comme dans FaceTime) sans arrêter la détection
         self._switch_req: dict | None = None
         self._resize_to: tuple[int, int] | None = None
+        # Économie d'énergie : nombre maximal d'images analysées par seconde en direct (0 = sans limite).
+        # Les traces d'une chambre de Wilson restent visibles ≥ 0,5 s : 15 img/s suffisent largement
+        # et le processeur (donc le Mac) chauffe environ deux fois moins.
+        self.live_max_fps: float = 0.0
 
     def frame_consumed(self):
         """Appelé par l'interface quand l'image envoyée a été affichée."""
@@ -485,6 +489,11 @@ class ProcessingWorker(QThread):
                 stats = self._stats(det, res, src, fps_hist, now - t_start)
                 self._ui_pending_since = now
                 self.frame_ready.emit(bgr_to_qimage(img), stats)
+            if live and self.live_max_fps > 0:
+                spent = time.perf_counter() - t0
+                target = 1.0 / self.live_max_fps
+                if spent < target:
+                    time.sleep(target - spent)
             if self.realtime_file and not live:
                 target = 1.0 / max(src.fps, 1.0)
                 spent = time.perf_counter() - t0

@@ -412,6 +412,9 @@ def run_gui(argv=None) -> int:
     step("Démarrage…", 0.05)
     try:
         import cv2  # noqa: F401  (chargement long : fait pendant l'animation)
+        # Moins de chauffe : OpenCV prend sinon tous les cœurs pour chaque opération, et avec deux
+        # caméras les fils se marchent dessus. Deux cœurs suffisent à 960 px de large.
+        cv2.setNumThreads(2)
         import numpy  # noqa: F401
     except Exception:
         pass

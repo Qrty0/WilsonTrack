@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
                 self.restoreGeometry(bytes.fromhex(geo))
             except Exception:
                 pass
+        self.eco_chk.setChecked(bool(self.settings.get("power_save", True)))
         self._reaper = QTimer(self, interval=3000)
         self._reaper.timeout.connect(reap_threads)
         self._reaper.start()
@@ -351,6 +352,12 @@ class MainWindow(QMainWindow):
         bar.addSpacing(8)
         bar.addWidget(self.labels_chk)
         bar.addWidget(self.realtime_chk)
+        self.eco_chk = QCheckBox("Économie d'énergie")
+        self.eco_chk.setToolTip("Analyse au plus 15 images/s par caméra : le Mac chauffe beaucoup moins, "
+                                "la détection reste fiable (les traces durent au moins 0,5 s). "
+                                "Décochez pour analyser chaque image (plus de chauffe).")
+        self.eco_chk.toggled.connect(self._on_eco)
+        bar.addWidget(self.eco_chk)
         bar.addStretch(1)
         bar.addWidget(self.rec_label)
         self.session_bar = SessionStatusBar()
@@ -940,6 +947,7 @@ class MainWindow(QMainWindow):
         self.worker2 = ProcessingWorker(factory, cfg, f"camera:{idx} ({self.cam2_label})")
         self.worker2.view_mode = self.view_mode.currentData()
         wk2 = self.worker2
+        wk2.live_max_fps = self.ECO_FPS if self.eco_chk.isChecked() else 0.0
         self.worker2.frame_ready.connect(lambda img, st, wk2=wk2: wk2 is self.worker2 and self._on_frame2(img, st))
         self.worker2.run_finished.connect(self._on_cam2_finished)
         self.worker2.error.connect(lambda m: QMessageBox.warning(self, "2e caméra", m))
@@ -1061,6 +1069,14 @@ class MainWindow(QMainWindow):
         self._fill_pickers()
 
     # ------------------------------------------- listes de caméras au-dessus des images --
+    ECO_FPS = 15.0
+
+    def _on_eco(self, on: bool):
+        self.settings.set("power_save", bool(on))
+        for wk in (self.worker, self.worker2):
+            if wk is not None:
+                wk.live_max_fps = self.ECO_FPS if on else 0.0
+
     def _toggle_fullscreen(self, slot: int):
         """Double-clic sur une image : la caméra en plein écran (double-clic / Échap pour revenir)."""
         if self._fs is not None:
@@ -1278,6 +1294,7 @@ class MainWindow(QMainWindow):
             self.session_bar.hide()
         self._on_view_mode()
         wk = self.worker
+        wk.live_max_fps = self.ECO_FPS if self.eco_chk.isChecked() else 0.0
         self.worker.frame_ready.connect(lambda img, st, wk=wk: wk is self.worker and self._on_frame(img, st))
         self.worker.track_finished.connect(self._on_track)
         self.worker.run_finished.connect(lambda run, wk=wk: wk is self.worker and self._on_run_finished(run))
