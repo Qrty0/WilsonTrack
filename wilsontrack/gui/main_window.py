@@ -163,6 +163,9 @@ class MainWindow(QMainWindow):
         self.a_home = act("Accueil", self.go_home, "Ctrl+H", "Revenir au menu d'accueil", icon="home")
         self.a_camera = act("Caméra", lambda: self.start_source("camera"), "Ctrl+K",
                             "Démarrer l'acquisition en direct depuis la caméra", icon="camera")
+        self.a_switch_cam = act("Changer de caméra", self.switch_camera, "Ctrl+Shift+K",
+                                "Passer à la caméra suivante (Mac ↔ iPhone…) sans arrêter la détection",
+                                icon="swap")
         self.a_video = act("Vidéo…", self.open_video, "Ctrl+O", "Analyser un fichier vidéo", icon="video")
         self.a_photos = act("Série de photos…", self.open_folder, "Ctrl+Shift+O",
                             "Analyser une série de photos (rafale / time-lapse)", icon="images")
@@ -275,7 +278,8 @@ class MainWindow(QMainWindow):
 
         # ---- en-tête vert forêt : logo, nom, menus et actions essentielles ----------------
         self.header = BrandHeader(mb, [
-            (self.a_home, "home"), (self.a_camera, "camera"), (self.a_video, "video"), None,
+            (self.a_home, "home"), (self.a_camera, "camera"), (self.a_switch_cam, "swap", "Changer"),
+            (self.a_video, "video"), None,
             (self.a_pause, "pause"), (self.a_stop, "stop"), None,
             (self.a_record, "record", "Enregistrer"), (self.a_snap, "photo"), None,
             (self.a_settings, "gear")])
@@ -847,6 +851,52 @@ class MainWindow(QMainWindow):
         self.panel.camera.setCurrentIndex(j)
         self.start_source("camera")
 
+    # ================================================== changer de caméra ==
+    def switch_camera(self):
+        """Passe à la caméra suivante, comme le bouton de FaceTime (Mac ↔ iPhone ↔ webcam USB).
+
+        Pendant une acquisition en direct, la détection continue : seule la source change.
+        Sinon, on choisit simplement la caméra suivante pour le prochain démarrage."""
+        combo = self.panel.camera
+        cams = [c for c in self.settings.get("cameras_cache", []) if isinstance(c, dict) and "index" in c]
+        if len(cams) < 2:
+            self._refresh_cameras(quick=False)
+            cams = [c for c in self.settings.get("cameras_cache", []) if isinstance(c, dict) and "index" in c]
+        if len(cams) < 2:
+            QMessageBox.information(
+                self, "Changer de caméra",
+                "Une seule caméra est disponible pour le moment.\n\n"
+                "Pour utiliser l'iPhone comme caméra (Caméra de continuité, comme dans FaceTime) :\n"
+                "• même identifiant Apple sur le Mac et l'iPhone ;\n"
+                "• Wi-Fi et Bluetooth activés sur les deux ;\n"
+                "• iPhone à proximité, verrouillé et immobile (sur un support, au-dessus de la chambre) ;\n"
+                "• iPhone : Réglages › Général › AirPlay et Continuité › Caméra de continuité activée.\n\n"
+                "Un câble USB fonctionne aussi. Cliquez ensuite à nouveau sur « Changer de caméra ».")
+            return
+        cur = self.panel.camera_settings()["index"]
+        order = [int(c["index"]) for c in cams]
+        nxt = cams[(order.index(cur) + 1) % len(cams)] if cur in order else cams[0]
+        label = nxt.get("name") or nxt.get("label") or f"Caméra {nxt['index']}"
+        j = combo.findData(int(nxt["index"]))
+        if j >= 0:
+            combo.setCurrentIndex(j)
+        self.settings.set("cam_index", int(nxt["index"]))
+        try:
+            self.home.set_cameras(cams)
+        except Exception:
+            pass
+        if self.worker is not None and self.source_kind == "camera":
+            req = self.panel.camera_settings()
+            req["index"], req["label"] = int(nxt["index"]), str(label)
+            self.worker.send("switch_camera", req)
+            self.statusBar().showMessage(f"Passage à {label}…", 6000)
+        else:
+            self.statusBar().showMessage(f"Caméra choisie : {label}. Cliquez sur « Caméra » pour démarrer.", 6000)
+
+    def _on_camera_switched(self, index: int):
+        self.source_arg = index
+        self.settings.set("cam_index", int(index))
+
     def _video_defaults(self) -> dict:
         p = self.panel
         return {"condition": p.condition.currentText(), "sample": p.sample.currentText(),
@@ -970,6 +1020,7 @@ class MainWindow(QMainWindow):
         self.worker.run_finished.connect(self._on_run_finished)
         self.worker.error.connect(self._on_worker_error)
         self.worker.info.connect(lambda s: self.statusBar().showMessage(s, 8000))
+        self.worker.camera_switched.connect(self._on_camera_switched)
         self.worker.snapshot_saved.connect(lambda s: self.statusBar().showMessage(f"Photo enregistrée : {s}", 8000))
         self.worker.finished.connect(self._on_worker_done)
         self.worker.start()

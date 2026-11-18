@@ -1329,7 +1329,7 @@ class HomePage(QWidget):
     def _build_cards(self):
         # 1. Caméra en direct ------------------------------------------------------------
         cam = ActionCard("camera", "Caméra en direct",
-                         "Webcam USB ou téléphone (DroidCam, Iriun…) fixé au-dessus de la chambre : "
+                         "Webcam USB, iPhone (Caméra de continuité) ou téléphone (DroidCam, Iriun…) fixé au-dessus de la chambre : "
                          "les traces sont détectées en temps réel.")
         self.cam_combo = NoWheelComboBox()
         self.cam_combo.setToolTip("Caméra à utiliser")

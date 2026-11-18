@@ -11,6 +11,7 @@ anthropic>=1.0
 pyserial>=3.5
 joblib>=1.3
 pillow>=10
+pyobjc-framework-AVFoundation>=10; sys_platform == "darwin"   # Mac : noms des caméras, iPhone (continuité)
 # développement
 pytest>=8
 pyinstaller>=6.10

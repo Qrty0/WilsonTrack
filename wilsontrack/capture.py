@@ -20,9 +20,44 @@ BACKENDS = {
 }
 
 
+def mac_video_devices() -> list[dict] | None:
+    """Caméras vues par macOS (AVFoundation), dans l'ordre des index d'OpenCV.
+
+    OpenCV numérote les caméras dans l'ordre de AVCaptureDevice.devicesWithMediaType (vidéo, puis
+    « muxed »). On lit cette même liste pour donner leur vrai nom aux caméras (« Caméra FaceTime HD »,
+    « iPhone de … ») et reconnaître l'iPhone (Caméra de continuité). None si indisponible (hors Mac,
+    PyObjC absent…) : on retombe alors sur la numérotation simple.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        import AVFoundation as AVF  # pyobjc-framework-AVFoundation
+        devs = list(AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeVideo) or [])
+        devs += list(AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeMuxed) or [])
+    except Exception:
+        return None
+    out = []
+    for d in devs:
+        try:
+            name = str(d.localizedName())
+            dtype = str(d.deviceType() or "")
+            model = str(d.modelID() or "")
+        except Exception:
+            name, dtype, model = "Caméra", "", ""
+        low = name.lower()
+        phone = ("Continuity" in dtype or "iPhone" in model or "iphone" in low or "ipad" in low
+                 or any(k in low for k in ("iriun", "droidcam", "epoccam", "camo")))
+        out.append({"name": name, "phone": phone})
+    return out
+
+
 def list_cameras(max_index: int = 6, backend: str = "DirectShow") -> list[dict]:
     """Détecte les caméras disponibles (index 0..max_index-1)."""
     found = []
+    mac = mac_video_devices()
+    if mac is not None:
+        # Sur Mac on connaît la liste exacte : inutile de sonder des index vides (lent avec AVFoundation)
+        max_index = len(mac)
     api = BACKENDS.get(backend, cv2.CAP_ANY) if sys.platform == "win32" else cv2.CAP_ANY
     # Pendant la recherche, OpenCV affiche des avertissements bruts pour chaque index vide
     try:
@@ -36,8 +71,11 @@ def list_cameras(max_index: int = 6, backend: str = "DirectShow") -> list[dict]:
             if cap is not None and cap.isOpened():
                 ok, fr = cap.read()
                 if ok and fr is not None:
-                    found.append({"index": i, "width": fr.shape[1], "height": fr.shape[0],
-                                  "label": f"Caméra {i} ({fr.shape[1]}×{fr.shape[0]})"})
+                    name, phone = f"Caméra {i}", False
+                    if mac is not None and i < len(mac):
+                        name, phone = mac[i]["name"], mac[i]["phone"]
+                    found.append({"index": i, "width": fr.shape[1], "height": fr.shape[0], "phone": phone,
+                                  "name": name, "label": f"{'📱 ' if phone else ''}{name} ({fr.shape[1]}×{fr.shape[0]})"})
             if cap is not None:
                 cap.release()
     finally:

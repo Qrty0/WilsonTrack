@@ -20,7 +20,7 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 
 from ..analysis.run import LONG_VIDEO_S, build_run_result, limit_memory, make_spill_dir
-from ..capture import FrameSource, VideoRecorder, imwrite
+from ..capture import CameraSource, FrameSource, VideoRecorder, imwrite
 from ..config import AppConfig
 from ..detection import TrackDetector
 from ..longrun import (KeepAwake, NightSessionConfig, ReconnectPolicy, SessionController, SourceTime,
@@ -92,6 +92,7 @@ class ProcessingWorker(QThread):
     snapshot_saved = Signal(str)
     session_status = Signal(dict)            # session de nuit : état toutes les ~2 s
     session_warning = Signal(str)            # session de nuit : nouvel avertissement (aussi dans le journal)
+    camera_switched = Signal(int)            # changement de caméra à chaud réussi (index OpenCV)
 
     def __init__(self, source_factory, cfg: AppConfig, source_name: str, realtime_file: bool = False,
                  display_max_w: int = 1280, session: NightSessionConfig | dict | None = None,
@@ -126,6 +127,9 @@ class ProcessingWorker(QThread):
         # précédente a été affichée. Sinon, si l'écran est plus lent que la caméra (Mac Retina…),
         # les images s'empilent dans la file Qt et l'application gèle en dévorant la mémoire.
         self._ui_pending_since: float | None = None
+        # Changement de caméra à chaud (Mac ↔ iPhone, comme dans FaceTime) sans arrêter la détection
+        self._switch_req: dict | None = None
+        self._resize_to: tuple[int, int] | None = None
 
     def frame_consumed(self):
         """Appelé par l'interface quand l'image envoyée a été affichée."""
@@ -252,6 +256,8 @@ class ProcessingWorker(QThread):
                 self._apply_live(arg)
             elif name == "reset_background" and det is not None:
                 det.bg.reset()
+            elif name == "switch_camera" and getattr(src, "live", False):
+                self._switch_req = dict(arg)
             elif name == "camera_set" and hasattr(src, "set"):
                 prop, val = arg
                 src.set(prop, val)
@@ -261,6 +267,35 @@ class ProcessingWorker(QThread):
                 # « Sauvegarder maintenant » pendant une session de nuit
                 if self.session_ctl.checkpoint(det):
                     self.info.emit("Point de sauvegarde en cours d'écriture…")
+
+    def _switch_camera(self, src):
+        """Ouvre la caméra demandée et remplace la source en cours ; garde l'ancienne en cas d'échec."""
+        req, self._switch_req = self._switch_req, None
+        idx = int(req.get("index", 0))
+        label = str(req.get("label") or f"caméra {idx}")
+        h, w = src.shape
+        fps, backend = float(req.get("fps") or src.fps or 30.0), str(req.get("backend") or "auto")
+        self.info.emit(f"Passage à {label}…")
+        try:
+            new = CameraSource(idx, w, h, fps, backend)
+        except Exception as e:
+            self.info.emit(f"Impossible d'ouvrir {label} : {e}")
+            return src
+        try:
+            src.release()
+        except Exception:
+            pass
+        self.source = new
+        # Les reconnexions automatiques rouvriront la nouvelle caméra
+        self.source_factory = lambda: CameraSource(idx, w, h, fps, backend)  # noqa: E731
+        # Le détecteur garde sa taille d'image : on remet les images de la nouvelle caméra à l'échelle
+        self._resize_to = None if tuple(new.shape) == (h, w) else (w, h)
+        new.shape = (h, w)                  # taille vue par l'enregistreur et le détecteur
+        if self.detector is not None:
+            self.detector.bg.reset()        # nouveau point de vue : on réapprend le fond
+        self.info.emit(f"Caméra : {label} — apprentissage du fond…")
+        self.camera_switched.emit(idx)
+        return new
 
     def _reopen(self):
         """Ferme puis rouvre la source (caméra) après une coupure passagère du flux."""
@@ -317,6 +352,8 @@ class ProcessingWorker(QThread):
         self._stop_reason = "arrêt manuel"
         while not self._stop:
             self._handle_commands(src)
+            if self._switch_req is not None:
+                src = self._switch_camera(src)
             if self._paused:
                 if ctl is not None:
                     self._emit_status(ctl.idle_tick(det))
@@ -381,6 +418,8 @@ class ProcessingWorker(QThread):
             if n_fail:
                 n_fail = 0
                 self.info.emit("Caméra connectée.")
+            if self._resize_to is not None and (frame.shape[1], frame.shape[0]) != self._resize_to:
+                frame = cv2.resize(frame, self._resize_to, interpolation=cv2.INTER_AREA)
             t_det = t if live else None
             if ctl is not None:
                 gap = policy.ok()

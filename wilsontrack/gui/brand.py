@@ -457,6 +457,17 @@ def _icon_path(name: str, s: float) -> tuple[QPainterPath, bool]:
         P.lineTo(pt(4.5, 19.5))
         P.lineTo(pt(19.5, 19.5))
         P.lineTo(pt(19.5, 15))
+    elif name == "swap":                   # deux flèches opposées : changer de caméra
+        P.moveTo(pt(4, 8))
+        P.lineTo(pt(18.5, 8))
+        P.moveTo(pt(15, 4.5))
+        P.lineTo(pt(18.5, 8))
+        P.lineTo(pt(15, 11.5))
+        P.moveTo(pt(20, 16))
+        P.lineTo(pt(5.5, 16))
+        P.moveTo(pt(9, 12.5))
+        P.lineTo(pt(5.5, 16))
+        P.lineTo(pt(9, 19.5))
     else:                                  # point
         P.addEllipse(QPointF(12 * u, 12 * u), 3 * u, 3 * u)
         fill = True
@@ -464,7 +475,8 @@ def _icon_path(name: str, s: float) -> tuple[QPainterPath, bool]:
 
 
 ICONS = ("home", "camera", "video", "pause", "stop", "record", "photo", "gear", "folder", "spark", "help",
-         "chevron", "arrow", "check", "moon", "bars", "images", "flask", "inbox", "book", "chat", "drop")
+         "chevron", "arrow", "check", "moon", "bars", "images", "flask", "inbox", "book", "chat", "drop",
+         "swap")
 
 
 def icon_pixmap(name: str, color: str, size: int = 18, dpr: float = 2.0, stroke: float = 1.8) -> QPixmap:

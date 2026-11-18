@@ -12,7 +12,8 @@ hidden = (
     + collect_submodules("wilsontrack")
     + ["PySide6.QtSvg",                       # logos officiels du Cégep (SVG) : ne pas exclure
        "matplotlib.backends.backend_qtagg", "matplotlib.backends.backend_agg", "pyqtgraph", "anthropic",
-       "openpyxl", "joblib", "scipy.sparse.csgraph", "scipy.ndimage", "scipy.stats"]
+       "openpyxl", "joblib", "scipy.sparse.csgraph", "scipy.ndimage", "scipy.stats",
+       "objc", "AVFoundation", "CoreMedia"]   # noms des caméras / iPhone (Caméra de continuité)
 )
 
 datas = [("wilsontrack/assets", "wilsontrack/assets")]
@@ -58,6 +59,8 @@ app = BUNDLE(
         "NSHighResolutionCapable": True,
         # Obligatoire sur macOS pour utiliser la webcam (sinon la caméra reste noire)
         "NSCameraUsageDescription": "WilsonTrack filme la chambre de Wilson pour détecter les traces de particules.",
+        # Caméra de continuité : l'iPhone à proximité apparaît comme une caméra du Mac (comme dans FaceTime)
+        "NSCameraUseContinuityCameraDeviceType": True,
         "NSHumanReadableCopyright": "Projet d'intégration — Cégep Marie-Victorin",
     },
 )
