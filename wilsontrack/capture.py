@@ -156,6 +156,34 @@ class CameraSource(FrameSource):
         self._t0 = time.perf_counter()
         self._first = fr
         self._count = 0
+        # Lecture dans un fil à part : cap.read() peut rester bloqué indéfiniment (iPhone qui se met en
+        # veille, câble USB débranché…). Le traitement ne fait qu'attendre la dernière image avec un délai
+        # maximum : il ne gèle jamais, l'arrêt reste immédiat, et les images en retard sont sautées.
+        self._cond = threading.Condition()
+        self._latest = None
+        self._seq = 0
+        self._seen = 0
+        self._alive = True
+        self._reader = threading.Thread(target=self._reader_loop, name="CameraReader", daemon=True)
+        self._reader.start()
+
+    read_timeout = 0.25   # s sans nouvelle image → read() renvoie False (le traitement gère la reconnexion)
+
+    def _reader_loop(self):
+        while self._alive:
+            try:
+                ok, fr = self.cap.read()
+            except Exception:
+                ok, fr = False, None
+            if not self._alive:
+                break
+            if not ok or fr is None or fr.size == 0:
+                time.sleep(0.01)
+                continue
+            with self._cond:
+                self._latest = fr
+                self._seq += 1
+                self._cond.notify_all()
 
     def _warmup(self, attempts: int = 30):
         """Lit quelques images pour laisser la caméra démarrer ; renvoie la première image valide."""
@@ -171,10 +199,15 @@ class CameraSource(FrameSource):
             fr, self._first = self._first, None
             self._count += 1
             return True, fr, time.perf_counter() - self._t0
-        ok, fr = self.cap.read()
-        if ok:
-            self._count += 1
-        return ok, fr, time.perf_counter() - self._t0
+        with self._cond:
+            if self._seq == self._seen:
+                self._cond.wait(self.read_timeout)
+            if self._seq == self._seen:
+                return False, None, time.perf_counter() - self._t0
+            self._seen = self._seq
+            fr = self._latest
+        self._count += 1
+        return True, fr, time.perf_counter() - self._t0
 
     @property
     def position(self) -> int:
@@ -200,6 +233,14 @@ class CameraSource(FrameSource):
         self.cap.set(cv2.CAP_PROP_SETTINGS, 1)
 
     def release(self):
+        self._alive = False
+        r = getattr(self, "_reader", None)
+        if r is not None and r.is_alive():
+            r.join(1.5)
+            if r.is_alive():
+                # cap.read() bloqué dans le pilote : libérer la caméra pendant la lecture ferait planter
+                # l'application. On l'abandonne ; macOS la libère à la fermeture de l'application.
+                return
         try:
             self.cap.release()
         except Exception:

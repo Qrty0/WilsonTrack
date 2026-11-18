@@ -4,7 +4,15 @@
     python main.py analyser ...   → ligne de commande (voir « python main.py --aide »)
 """
 import multiprocessing
+import os
 import sys
+
+# L'IA de classement (scikit-learn) ne prédit que quelques traces à la fois : avec OpenMP en mode
+# « attente active », ses fils tournent à vide et saturent tous les cœurs (≈ 500 % CPU sur Mac),
+# ce qui ralentit toute l'application. Un seul fil, en attente passive, suffit largement.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+os.environ.setdefault("KMP_BLOCKTIME", "0")
 
 CLI_COMMANDS = {"analyser", "comparer", "synthetique", "valider", "cameras", "nuit", "lot", "surveiller",
                 "-h", "--help", "--aide"}

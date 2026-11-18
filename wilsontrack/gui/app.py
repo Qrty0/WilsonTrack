@@ -438,4 +438,9 @@ def run_gui(argv=None) -> int:
             w.show()
     else:
         w.show()
-    return app.exec()
+    rc = app.exec()
+    if getattr(w, "unclean_exit", False):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(rc)
+    return rc

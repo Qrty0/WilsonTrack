@@ -359,7 +359,16 @@ class MainWindow(QMainWindow):
         # 2e caméra simultanée : seconde image côte à côte, avec sa propre détection
         self.video_split = QSplitter(Qt.Orientation.Horizontal)
         self.video_split.setChildrenCollapsible(False)
-        self.video_split.addWidget(self.video)
+        cam1_box = QWidget()
+        c1 = QVBoxLayout(cam1_box)
+        c1.setContentsMargins(0, 0, 0, 0)
+        c1.setSpacing(4)
+        self.cam1_title = QLabel("Caméra 1")
+        self.cam1_title.setStyleSheet(f"color:{B.FOREST}; font-weight:700; padding: 0 4px;")
+        self.cam1_title.hide()               # visible seulement en mode 2 caméras
+        c1.addWidget(self.cam1_title)
+        c1.addWidget(self.video, 1)
+        self.video_split.addWidget(cam1_box)
         cam2_box = QWidget()
         c2 = QVBoxLayout(cam2_box)
         c2.setContentsMargins(0, 0, 0, 0)
@@ -909,7 +918,12 @@ class MainWindow(QMainWindow):
         self.start_cam2(cam)
 
     def start_cam2(self, cam: dict):
-        self.stop_cam2(save=False)
+        if self.worker2 is not None:
+            old = self.worker2
+            self.stop_cam2(save=False)
+            old.wait(4000)
+            self._zombies = getattr(self, "_zombies", []) + ([old] if old.isRunning() else [])
+            self.worker2 = None
         idx = int(cam["index"])
         w = int(cam.get("width") or 1280)
         h = int(cam.get("height") or 720)
@@ -920,12 +934,15 @@ class MainWindow(QMainWindow):
         factory = lambda: CameraSource(idx, w, h, fps, backend)  # noqa: E731
         self.worker2 = ProcessingWorker(factory, cfg, f"camera:{idx} ({self.cam2_label})")
         self.worker2.view_mode = self.view_mode.currentData()
-        self.worker2.frame_ready.connect(self._on_frame2)
+        wk2 = self.worker2
+        self.worker2.frame_ready.connect(lambda img, st, wk2=wk2: wk2 is self.worker2 and self._on_frame2(img, st))
         self.worker2.run_finished.connect(self._on_cam2_finished)
         self.worker2.error.connect(lambda m: QMessageBox.warning(self, "2e caméra", m))
         self.worker2.info.connect(lambda m: self.cam2_info.setText(m))
-        self.worker2.finished.connect(self._on_cam2_done)
+        self.worker2.finished.connect(lambda wk2=wk2: self._on_cam2_done(wk2))
         self.cam2_title.setText(f"Caméra 2 — {self.cam2_label}")
+        self.cam1_title.setText(f"Caméra 1 — {self._camera_name(self.panel.camera_settings()['index'])}")
+        self.cam1_title.show()
         self.cam2_info.setText("Ouverture de la caméra…")
         self.cam2_box.show()
         self.video_split.setSizes([1, 1])
@@ -934,6 +951,12 @@ class MainWindow(QMainWindow):
         self._update_actions()
         self.tabs.setCurrentWidget(self.tab_live)
         self.statusBar().showMessage(f"2e caméra : {self.cam2_label} — apprentissage du fond…", 6000)
+
+    def _camera_name(self, index) -> str:
+        for c in self.settings.get("cameras_cache", []):
+            if isinstance(c, dict) and int(c.get("index", -1)) == int(index):
+                return str(c.get("name") or c.get("label") or f"Caméra {index}")
+        return f"Caméra {index}"
 
     def stop_cam2(self, save: bool = True):
         w = self.worker2
@@ -963,10 +986,14 @@ class MainWindow(QMainWindow):
                 pass
             self._save_run(run, quiet=True)
 
-    def _on_cam2_done(self):
+    def _on_cam2_done(self, wk2=None):
+        self._zombies = [z for z in getattr(self, "_zombies", []) if z is not wk2]
+        if wk2 is not None and wk2 is not self.worker2:
+            return
         self.worker2 = None
         self.a_cam2.setChecked(False)
         self.cam2_box.hide()
+        self.cam1_title.hide()
         self._update_actions()
 
     # ================================================== changer de caméra ==
@@ -1096,7 +1123,11 @@ class MainWindow(QMainWindow):
 
     def start_source(self, kind: str, arg=None, session: dict | None = None):
         if self.worker is not None:
+            old = self.worker
             self.stop_source(wait=True)
+            if old.isRunning():
+                # Il finira tout seul ; on le garde en vie (détruire un QThread actif fait planter l'app)
+                self._zombies = getattr(self, "_zombies", []) + [old]
         self.cfg = self.panel.apply_to(self.cfg)
         cfg = self.cfg.copy()
         cam = self.panel.camera_settings()
@@ -1139,14 +1170,15 @@ class MainWindow(QMainWindow):
             self.worker = ProcessingWorker(factory, cfg, name, realtime_file=self.realtime_chk.isChecked())
             self.session_bar.hide()
         self._on_view_mode()
-        self.worker.frame_ready.connect(self._on_frame)
+        wk = self.worker
+        self.worker.frame_ready.connect(lambda img, st, wk=wk: wk is self.worker and self._on_frame(img, st))
         self.worker.track_finished.connect(self._on_track)
-        self.worker.run_finished.connect(self._on_run_finished)
+        self.worker.run_finished.connect(lambda run, wk=wk: wk is self.worker and self._on_run_finished(run))
         self.worker.error.connect(self._on_worker_error)
         self.worker.info.connect(lambda s: self.statusBar().showMessage(s, 8000))
         self.worker.camera_switched.connect(self._on_camera_switched)
         self.worker.snapshot_saved.connect(lambda s: self.statusBar().showMessage(f"Photo enregistrée : {s}", 8000))
-        self.worker.finished.connect(self._on_worker_done)
+        self.worker.finished.connect(lambda wk=wk: self._on_worker_done(wk))
         self.worker.start()
         self._setup_serial(cfg)
         self.tabs.setCurrentWidget(self.tab_live)
@@ -1297,7 +1329,11 @@ class MainWindow(QMainWindow):
     def _on_worker_error(self, msg: str):
         QMessageBox.critical(self, "Erreur", msg)
 
-    def _on_worker_done(self):
+    def _on_worker_done(self, wk=None):
+        if wk is not None:
+            self._zombies = [z for z in getattr(self, "_zombies", []) if z is not wk]
+            if wk is not self.worker:
+                return                       # ancien traitement qui finit en retard : ne touche à rien
         self.worker = None
         if self.serial is not None:
             self.serial.close()
@@ -2184,12 +2220,14 @@ class MainWindow(QMainWindow):
                           "statistiques de Poisson. Second avis optionnel : Claude Opus 5.5 (Anthropic).</p>")
 
     def closeEvent(self, ev):
-        if self.worker2 is not None:
-            self.worker2.stop()
-            self.worker2.wait(15000)
-        if self.worker is not None:
-            self.worker.stop()
-            self.worker.wait(15000)
+        threads = [t for t in (self.worker2, self.worker, *getattr(self, "_zombies", [])) if t is not None]
+        for t in threads:
+            t.stop()
+        for t in threads:
+            t.wait(15000)
+        # Un fil encore bloqué (caméra figée dans son pilote) ferait planter Qt à la sortie (SIGABRT) :
+        # run_gui quitte alors directement, une fois les réglages enregistrés ci-dessous.
+        self.unclean_exit = any(t.isRunning() for t in threads)
         if getattr(self, "batch_ctl", None) is not None:
             try:
                 self.batch_ctl.stop()
