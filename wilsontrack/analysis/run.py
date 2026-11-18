@@ -474,7 +474,10 @@ def analyze_video(path: str, cfg: AppConfig, progress: Callable[..., bool | None
     défaut, vidé par ``RunResult.save``). Images illisibles au milieu du fichier : sautées et
     signalées dans ``run.analysis_warnings``.
     """
-    cap = cv2.VideoCapture(str(path))
+    from ..capture import open_video
+    # Lecture continue sans saut : décodeur matériel du Mac (vidéos d'iPhone ≈ 10× plus rapides à lire).
+    # Avec un début demandé, saut précis → lecteur habituel.
+    cap = open_video(path, sequential=not (start_s > 0))
     if not cap.isOpened():
         raise IOError(f"Impossible d'ouvrir la vidéo : {path}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0

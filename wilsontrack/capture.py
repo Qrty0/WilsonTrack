@@ -328,6 +328,23 @@ class CameraSource(FrameSource):
             pass
 
 
+def open_video(path: str | Path, sequential: bool = True) -> cv2.VideoCapture:
+    """Ouvre une vidéo pour une lecture image par image.
+
+    Mac + lecture continue : décodeur matériel (AVFoundation / VideoToolbox), ≈ 10× plus rapide pour
+    les vidéos HEVC d'iPhone. Si un saut précis est nécessaire (sequential=False), ou si le décodeur
+    matériel échoue, lecteur habituel (FFmpeg)."""
+    if sequential and sys.platform == "darwin":
+        try:
+            cap = cv2.VideoCapture(str(path), cv2.CAP_AVFOUNDATION)
+            if cap.isOpened():
+                return cap
+            cap.release()
+        except Exception:
+            pass
+    return cv2.VideoCapture(str(path))
+
+
 class FileSource(FrameSource):
     live = False
 
