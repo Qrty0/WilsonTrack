@@ -1,0 +1,43 @@
+# Construit automatiquement l'application Windows (.exe) et macOS (.dmg) sur les machines de GitHub.
+# Déclenchement : bouton « Run workflow » dans l'onglet Actions du dépôt, ou à chaque étiquette v*.
+# Les fichiers produits se téléchargent en bas de la page du « run » (section Artifacts).
+name: Construire WilsonTrack
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Construction (.app + .dmg)
+        run: PYTHON=python bash build_mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WilsonTrack-macOS
+          path: dist_mac/WilsonTrack-2.0-macOS.dmg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Construction (.exe)
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+          .\build_exe.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WilsonTrack-Windows
+          path: dist/WilsonTrack-2.0-Windows.zip

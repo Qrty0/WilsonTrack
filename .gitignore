@@ -1,0 +1,17 @@
+.venv/
+.venv-mac/
+build/
+build_new/
+build_mac/
+dist/
+dist_new/
+dist_mac/
+__pycache__/
+*.pyc
+.pytest_cache/
+_training/
+_previews/
+_validation/
+exemples/vidéos réelles (Wikimedia)/
+*.log
+.claude/
