@@ -51,6 +51,54 @@ def mac_video_devices() -> list[dict] | None:
     return out
 
 
+def _mac_device(index: int):
+    """AVCaptureDevice correspondant à l'index OpenCV (même ordre que mac_video_devices)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import AVFoundation as AVF
+        devs = list(AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeVideo) or [])
+        devs += list(AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeMuxed) or [])
+        return devs[index] if 0 <= index < len(devs) else None
+    except Exception:
+        return None
+
+
+def hw_zoom_range(index: int) -> tuple[float, float] | None:
+    """(min, max) du zoom optique/matériel de la caméra (iPhone en Caméra de continuité), sinon None."""
+    d = _mac_device(index)
+    if d is None:
+        return None
+    try:
+        lo, hi = float(d.minAvailableVideoZoomFactor()), float(d.maxAvailableVideoZoomFactor())
+        return (lo, hi) if hi > lo + 1e-3 else None
+    except Exception:
+        return None
+
+
+def set_hw_zoom(index: int, factor: float) -> bool:
+    """Règle le zoom matériel de la caméra (transition douce). False si impossible."""
+    d = _mac_device(index)
+    if d is None:
+        return False
+    try:
+        lo, hi = float(d.minAvailableVideoZoomFactor()), float(d.maxAvailableVideoZoomFactor())
+        f = min(max(float(factor), lo), hi)
+        ok, _err = d.lockForConfiguration_(None)
+        if not ok:
+            return False
+        try:
+            if hasattr(d, "rampToVideoZoomFactor_withRate_"):
+                d.rampToVideoZoomFactor_withRate_(f, 8.0)
+            else:
+                d.setVideoZoomFactor_(f)
+        finally:
+            d.unlockForConfiguration()
+        return True
+    except Exception:
+        return False
+
+
 def list_cameras(max_index: int = 6, backend: str = "DirectShow") -> list[dict]:
     """Détecte les caméras disponibles (index 0..max_index-1)."""
     found = []
@@ -85,12 +133,13 @@ def list_cameras(max_index: int = 6, backend: str = "DirectShow") -> list[dict]:
                 cap.release()
             if fr is not None:
                 found.append({"index": i, "width": fr.shape[1], "height": fr.shape[0], "phone": phone,
-                              "name": name, "label": f"{'📱 ' if phone else ''}{name} ({fr.shape[1]}×{fr.shape[0]})"})
+                              "name": name, "label": f"{'📱 ' if phone else ''}{name} ({fr.shape[1]}×{fr.shape[0]})",
+                              "hw_zoom": hw_zoom_range(i)})
             elif mac is not None:
                 # macOS la voit mais elle n'a pas encore envoyé d'image (iPhone en veille, éloigné…) :
                 # on la propose quand même ; à l'ouverture, la caméra a plus de temps pour démarrer.
                 found.append({"index": i, "width": 1920, "height": 1080, "phone": phone, "name": name,
-                              "label": f"{'📱 ' if phone else ''}{name}"})
+                              "label": f"{'📱 ' if phone else ''}{name}", "hw_zoom": hw_zoom_range(i)})
     finally:
         if old is not None:
             try:
@@ -169,6 +218,8 @@ class CameraSource(FrameSource):
         self._t0 = time.perf_counter()
         self._first = fr
         self._count = 0
+        self.index = index
+        self.digital_zoom = 1.0           # zoom numérique (recadrage au centre) pour les webcams sans zoom
         # Lecture dans un fil à part : cap.read() peut rester bloqué indéfiniment (iPhone qui se met en
         # veille, câble USB débranché…). Le traitement ne fait qu'attendre la dernière image avec un délai
         # maximum : il ne gèle jamais, l'arrêt reste immédiat, et les images en retard sont sautées.
@@ -211,7 +262,7 @@ class CameraSource(FrameSource):
         if self._first is not None:
             fr, self._first = self._first, None
             self._count += 1
-            return True, fr, time.perf_counter() - self._t0
+            return True, self._apply_zoom(fr), time.perf_counter() - self._t0
         with self._cond:
             if self._seq == self._seen:
                 self._cond.wait(self.read_timeout)
@@ -220,7 +271,24 @@ class CameraSource(FrameSource):
             self._seen = self._seq
             fr = self._latest
         self._count += 1
-        return True, fr, time.perf_counter() - self._t0
+        return True, self._apply_zoom(fr), time.perf_counter() - self._t0
+
+    def _apply_zoom(self, fr):
+        z = self.digital_zoom
+        if fr is None or z <= 1.001:
+            return fr
+        h, w = fr.shape[:2]
+        cw, ch = int(round(w / z)), int(round(h / z))
+        x0, y0 = (w - cw) // 2, (h - ch) // 2
+        return cv2.resize(fr[y0:y0 + ch, x0:x0 + cw], (w, h), interpolation=cv2.INTER_LINEAR)
+
+    def set_zoom(self, hw_factor: float | None, digital: float = 1.0) -> bool:
+        """Zoom matériel (iPhone : facteur AVFoundation) ou, à défaut, zoom numérique (≥ 1)."""
+        if hw_factor is not None and set_hw_zoom(self.index, hw_factor):
+            self.digital_zoom = 1.0
+            return True
+        self.digital_zoom = max(1.0, float(digital))
+        return True
 
     @property
     def position(self) -> int:
@@ -265,13 +333,40 @@ class FileSource(FrameSource):
 
     def __init__(self, path: str | Path):
         self.path = str(path)
-        self.cap = cv2.VideoCapture(self.path)
+        self.cap = None
+        self._rand = None            # lecteur précis pour les sauts (grab_frame), ouvert à la demande
+        n_ff = 0
+        if sys.platform == "darwin":
+            # Mac : décodeur matériel (VideoToolbox via AVFoundation), ≈ 10× plus rapide pour les vidéos
+            # HEVC / H.264 d'iPhone (1,9 ms au lieu de 19,6 ms par image en 1080p). Ses sauts dans la
+            # vidéo ne tombent que sur des images clés : les sauts précis passent par FFmpeg.
+            try:
+                ff = cv2.VideoCapture(self.path, cv2.CAP_FFMPEG)
+                if ff.isOpened():
+                    n_ff = int(ff.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    self._rand = ff
+                cap = cv2.VideoCapture(self.path, cv2.CAP_AVFOUNDATION)
+                if cap.isOpened():
+                    self.cap = cap
+                else:
+                    cap.release()
+            except Exception:
+                self.cap = None
+        self._hw = self.cap is not None
+        if self.cap is None:
+            self.cap = cv2.VideoCapture(self.path)
         if not self.cap.isOpened():
             raise IOError(f"Impossible d'ouvrir la vidéo : {path}")
         f = self.cap.get(cv2.CAP_PROP_FPS)
         self.fps = f if f and 1 <= f <= 1000 else 30.0
-        self.n_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self.n_frames = n_ff or int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         ok, fr = self.cap.read()
+        if not ok and self._hw:
+            # décodeur matériel incapable de lire ce fichier : retour au lecteur habituel
+            self.cap.release()
+            self.cap = cv2.VideoCapture(self.path)
+            self._hw = False
+            ok, fr = self.cap.read()
         if not ok:
             raise IOError("La vidéo ne contient aucune image lisible.")
         self.shape = fr.shape[:2]
@@ -285,11 +380,29 @@ class FileSource(FrameSource):
             self._i += 1
         return ok, fr, t
 
+    def _random_cap(self):
+        if self._rand is None or not self._rand.isOpened():
+            self._rand = cv2.VideoCapture(self.path, cv2.CAP_FFMPEG) if sys.platform == "darwin" \
+                else cv2.VideoCapture(self.path)
+        return self._rand
+
     def seek(self, frame_idx: int):
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_idx))
-        self._i = max(0, frame_idx)
+        frame_idx = max(0, int(frame_idx))
+        if self._hw and frame_idx > 0:
+            # saut précis : on poursuit la lecture avec FFmpeg (le décodeur matériel tomberait à côté)
+            ff = self._random_cap()
+            if ff is not None and ff.isOpened():
+                self.cap.release()
+                self.cap, self._rand, self._hw = ff, None, False
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        self._i = frame_idx
 
     def grab_frame(self, frame_idx: int) -> np.ndarray | None:
+        if self._hw:
+            ff = self._random_cap()
+            ff.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(frame_idx)))
+            ok, fr = ff.read()
+            return fr if ok else None
         pos = self._i
         self.seek(frame_idx)
         ok, fr = self.cap.read()
@@ -301,7 +414,12 @@ class FileSource(FrameSource):
         return self._i
 
     def release(self):
-        self.cap.release()
+        for c in (self.cap, self._rand):
+            try:
+                if c is not None:
+                    c.release()
+            except Exception:
+                pass
 
 
 class ImageFolderSource(FrameSource):

@@ -257,7 +257,13 @@ class ProcessingWorker(QThread):
             if name == "record_start":
                 h, w = src.shape
                 try:
-                    self.recorder.start(arg, src.fps, (w, h))
+                    # En direct avec l'économie d'énergie, on n'analyse que ~15 img/s : la vidéo est écrite
+                    # à cette cadence (sinon elle serait lue deux fois trop vite).
+                    live_src = bool(getattr(src, "live", False))
+                    cap = self.live_max_fps if (live_src and self.live_max_fps > 0) else 0
+                    self._rec_fps = min(float(src.fps or 30.0), cap) if cap else float(src.fps or 30.0)
+                    self._rec_next = None
+                    self.recorder.start(arg, self._rec_fps if live_src else src.fps, (w, h))
                     self.info.emit(f"Enregistrement vidéo démarré : {arg}")
                 except Exception as e:
                     self.error.emit(str(e))
@@ -283,6 +289,9 @@ class ProcessingWorker(QThread):
                 det.bg.reset()
             elif name == "switch_camera" and getattr(src, "live", False):
                 self._switch_req = dict(arg)
+            elif name == "zoom" and hasattr(src, "set_zoom"):
+                hw, dig = arg
+                src.set_zoom(hw, dig)
             elif name == "camera_set" and hasattr(src, "set"):
                 prop, val = arg
                 src.set(prop, val)
@@ -292,6 +301,21 @@ class ProcessingWorker(QThread):
                 # « Sauvegarder maintenant » pendant une session de nuit
                 if self.session_ctl.checkpoint(det):
                     self.info.emit("Point de sauvegarde en cours d'écriture…")
+
+    def _write_live(self, frame, t: float):
+        """En direct, la vidéo suit l'horloge réelle : chaque image est écrite autant de fois que
+        nécessaire (ou pas du tout) pour que 1 s filmée = 1 s dans le fichier, même si l'analyse
+        ralentit ou si l'économie d'énergie saute des images."""
+        step = 1.0 / max(1.0, getattr(self, "_rec_fps", 30.0))
+        nxt = getattr(self, "_rec_next", None)
+        if nxt is None or t - nxt > 2.0:      # début, ou longue coupure (pause) : on se recale
+            nxt = t
+        n = 0
+        while nxt <= t + 1e-6 and n < 10:
+            self.recorder.write(frame)
+            nxt += step
+            n += 1
+        self._rec_next = nxt
 
     def _switch_camera(self, src):
         """Ouvre la caméra demandée et remplace la source en cours ; garde l'ancienne en cas d'échec."""
@@ -454,7 +478,10 @@ class ProcessingWorker(QThread):
                     self.info.emit("Caméra reconnectée : la session continue.")
                 t_det = stime(t) if live else None
             if self.recorder.active:
-                self.recorder.write(frame)
+                if live:
+                    self._write_live(frame, t)
+                else:
+                    self.recorder.write(frame)
             want_dbg = self.view_mode in ("diff", "evidence", "mask")
             res = det.process(frame, t_det, want_debug=want_dbg)
             self.last_frame = frame

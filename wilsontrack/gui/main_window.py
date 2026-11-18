@@ -144,6 +144,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self.eco_chk.setChecked(bool(self.settings.get("power_save", True)))
+        self._rec_timer = QTimer(self, interval=1000)
+        self._rec_timer.timeout.connect(self._tick_rec)
         self._reaper = QTimer(self, interval=3000)
         self._reaper.timeout.connect(reap_threads)
         self._reaper.start()
@@ -1127,10 +1129,25 @@ class MainWindow(QMainWindow):
         rb.setToolTip("Rechercher les caméras (iPhone qui vient de se réveiller, webcam branchée…)")
         rb.setAccessibleName("Rechercher les caméras")
         rb.clicked.connect(lambda: self._refresh_cameras(quick=False))
+        zoom = QComboBox()
+        zoom.setToolTip("Zoom de cette caméra. iPhone : vrai zoom de l'appareil (0,5× = grand angle). "
+                        "Autres caméras : zoom numérique au centre de l'image.")
+        zoom.setStyleSheet("QComboBox { combobox-popup: 0; }")
+        zoom.setMinimumWidth(84)
+        zoom.activated.connect(lambda _i, slot=slot, z=zoom: self._set_zoom(slot, z.currentData()))
+        zl = QLabel("Zoom")
+        zl.setObjectName("muted")
         lay.addWidget(lab)
         lay.addWidget(combo)
         lay.addWidget(rb)
+        lay.addSpacing(10)
+        lay.addWidget(zl)
+        lay.addWidget(zoom)
         lay.addStretch(1)
+        if slot == 1:
+            self.cam1_zoom = zoom
+        else:
+            self.cam2_zoom = zoom
         return row, combo
 
     def _current_cam_index(self, slot: int):
@@ -1153,6 +1170,50 @@ class MainWindow(QMainWindow):
             if cur is not None:
                 combo.setCurrentIndex(combo.findData(int(cur)))
             combo.blockSignals(False)
+            try:
+                self._fill_zoom(slot)       # nouvelle caméra : zoom remis au plus large
+            except AttributeError:
+                pass
+
+    # Niveaux de zoom façon iPhone. Caméra de continuité : le facteur 1 d'AVFoundation est le champ le plus
+    # large (grand angle), affiché « 0,5× » comme dans l'app Appareil photo ; « 1× » = facteur 2, etc.
+    PHONE_ZOOMS = (("0.5×", 1.0), ("1×", 2.0), ("2×", 4.0), ("3×", 6.0), ("5×", 10.0))
+    DIGITAL_ZOOMS = (("1×", 1.0), ("1.5×", 1.5), ("2×", 2.0), ("3×", 3.0))
+
+    def _cam_info(self, index):
+        for c in self.settings.get("cameras_cache", []):
+            if isinstance(c, dict) and index is not None and int(c.get("index", -1)) == int(index):
+                return c
+        return {}
+
+    def _fill_zoom(self, slot: int):
+        combo = self.cam1_zoom if slot == 1 else self.cam2_zoom
+        info = self._cam_info(self._current_cam_index(slot))
+        hw = info.get("hw_zoom")
+        combo.blockSignals(True)
+        combo.clear()
+        if hw:
+            lo, hi = float(hw[0]), float(hw[1])
+            for label, f in self.PHONE_ZOOMS:
+                if lo * f <= hi + 1e-6:
+                    combo.addItem(label, ("hw", lo * f))
+        else:
+            for label, z in self.DIGITAL_ZOOMS:
+                combo.addItem(label, ("num", z))
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _set_zoom(self, slot: int, data):
+        if not data:
+            return
+        kind, val = data
+        wk = self.worker if slot == 1 else self.worker2
+        if wk is None or (slot == 1 and self.source_kind != "camera"):
+            self.statusBar().showMessage("Démarrez d'abord la caméra pour régler son zoom.", 5000)
+            return
+        wk.send("zoom", (val, 1.0) if kind == "hw" else (None, val))
+        combo = self.cam1_zoom if slot == 1 else self.cam2_zoom
+        self.statusBar().showMessage(f"Caméra {slot} : zoom {combo.currentText()}", 3000)
 
     def _pick_camera(self, slot: int, index):
         if index is None:
@@ -1366,27 +1427,48 @@ class MainWindow(QMainWindow):
                                      if self.worker.paused else "Reprise.", 5000)
 
     def toggle_record(self):
-        if self.worker is None:
+        if self.worker is None and self.worker2 is None:
             self.a_record.setChecked(False)
+            self.statusBar().showMessage("Démarrez d'abord une caméra (ou une vidéo) pour enregistrer.", 5000)
             return
         if self.a_record.isChecked():
-            folder = Path(self.cfg.output_dir) / "Vidéos"
-            name = safe_name(default_run_name(self.cfg.run.condition, self.cfg.run.trial))
-            path = folder / f"{name}.mp4"
-            k = 2
-            while path.exists():
-                path = folder / f"{name} ({k}).mp4"
-                k += 1
-            self.worker.send("record_start", str(path))
-            self.rec_label.setText("⏺ ENREGISTREMENT")
+            # Toujours un vrai dossier : avant, un dossier de résultats vide donnait un chemin relatif
+            # (« Vidéos/… ») que l'application ne pouvait pas créer — rien n'était enregistré.
+            folder = self._out_dir() / "Vidéos"
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+            base = safe_name(f"{stamp} {self.cfg.run.condition}")
+            self._rec_paths = []
+            for slot, wk in ((1, self.worker), (2, self.worker2)):
+                if wk is None:
+                    continue
+                cam = self._camera_name(self._current_cam_index(slot)) if (slot == 2 or self.source_kind == "camera") \
+                    else "vidéo"
+                path = folder / safe_name(f"{base} — caméra {slot} ({cam}).mp4")
+                wk.send("record_start", str(path))
+                self._rec_paths.append(path)
+            self._rec_t0 = time.monotonic()
+            self._rec_timer.start()
+            self._tick_rec()
         else:
-            self.worker.send("record_stop")
+            for wk in (self.worker, self.worker2):
+                if wk is not None:
+                    wk.send("record_stop")
+            self._rec_timer.stop()
             self.rec_label.setText("")
+            paths = getattr(self, "_rec_paths", [])
+            if paths:
+                self.statusBar().showMessage(f"Vidéo(s) enregistrée(s) dans {paths[0].parent}", 15000)
+
+    def _tick_rec(self):
+        s = int(time.monotonic() - getattr(self, "_rec_t0", time.monotonic()))
+        n = len(getattr(self, "_rec_paths", []))
+        self.rec_label.setText(f"⏺ REC {s // 60:02d}:{s % 60:02d}" + (f"  ({n} caméras)" if n > 1 else ""))
 
     def snapshot(self):
         if self.worker is None:
             return
-        folder = Path(self.cfg.output_dir) / "Photos"
+        folder = self._out_dir() / "Photos"
         folder.mkdir(parents=True, exist_ok=True)
         self.worker.send("snapshot", str(folder))
 
@@ -1399,8 +1481,9 @@ class MainWindow(QMainWindow):
 
     def _update_actions(self):
         running = self.worker is not None
-        for a in (self.a_pause, self.a_record, self.a_snap):
+        for a in (self.a_pause, self.a_snap):
             a.setEnabled(running)
+        self.a_record.setEnabled(running or self.worker2 is not None)
         self.a_stop.setEnabled(running or self.worker2 is not None)
         self.a_trigger.setEnabled(running and self.cfg.expansion.enabled)
 
@@ -1419,6 +1502,8 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.a_record.setChecked(False)
         self.rec_label.setText("")
+        if hasattr(self, "_rec_timer"):
+            self._rec_timer.stop()
 
     def _on_view_mode(self, *_):
         if self.worker is not None:
@@ -1488,6 +1573,8 @@ class MainWindow(QMainWindow):
             self.serial = None
         self.a_record.setChecked(False)
         self.rec_label.setText("")
+        if hasattr(self, "_rec_timer"):
+            self._rec_timer.stop()
         self._update_actions()
 
     def _on_run_finished(self, run: RunResult):
