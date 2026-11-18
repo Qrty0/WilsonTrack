@@ -117,7 +117,7 @@ class SettingsPanel(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
-        self.setMinimumWidth(340)
+        self.setMinimumWidth(376)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         root = QWidget()

@@ -10,6 +10,7 @@ hidden = (
     + collect_submodules("serial.tools")
     + collect_submodules("wilsontrack")
     + [
+        "PySide6.QtSvg",                    # logos officiels du Cégep (SVG) : ne pas exclure
         "matplotlib.backends.backend_qtagg",
         "matplotlib.backends.backend_agg",
         "pyqtgraph",

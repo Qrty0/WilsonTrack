@@ -10,7 +10,8 @@ hidden = (
     + collect_submodules("sklearn.utils")
     + collect_submodules("serial.tools")
     + collect_submodules("wilsontrack")
-    + ["matplotlib.backends.backend_qtagg", "matplotlib.backends.backend_agg", "pyqtgraph", "anthropic",
+    + ["PySide6.QtSvg",                       # logos officiels du Cégep (SVG) : ne pas exclure
+       "matplotlib.backends.backend_qtagg", "matplotlib.backends.backend_agg", "pyqtgraph", "anthropic",
        "openpyxl", "joblib", "scipy.sparse.csgraph", "scipy.ndimage", "scipy.stats"]
 )
 

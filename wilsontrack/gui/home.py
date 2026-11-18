@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import (QEvent, QLocale, QMetaMethod, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl,
                             Signal)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QImage, QLinearGradient, QPainter, QPainterPath,
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QImage, QPainter, QPainterPath,
                            QPen, QPixmap, QRadialGradient)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLayout, QPushButton, QScrollArea, QSizePolicy, QToolButton,
@@ -1094,11 +1094,6 @@ class HeroBanner(QFrame):
         clip.addRoundedRect(r, 24, 24)
         p.fillPath(clip, QColor(B.FOREST))
         p.setClipPath(clip)
-        # halo très doux derrière le motif
-        g = QRadialGradient(QPointF(r.width() * 0.80, r.height() * 0.95), r.width() * 0.45)
-        g.setColorAt(0.0, QColor(38, 176, 118, 46))
-        g.setColorAt(1.0, QColor(38, 176, 118, 0))
-        p.fillRect(r, g)
         mint = QColor(B.MINT)
         for kind, cell, delay, alpha in self._pill_grid():
             k = B.ease((self._t_ms - delay) / self.PILL_MS)
