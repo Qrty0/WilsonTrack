@@ -728,6 +728,15 @@ class MainWindow(QMainWindow):
     # ============================================================ sources ====
     def _refresh_cameras(self, quick: bool):
         cams = self.settings.get("cameras_cache", []) if quick else []
+        if quick and cams:
+            # Mac : si la liste des caméras a changé (iPhone apparu, webcam branchée…), on recherche à nouveau
+            try:
+                from ..capture import mac_video_devices
+                mac = mac_video_devices()
+                if mac is not None and sorted(d["name"] for d in mac) != sorted(str(c.get("name", "")) for c in cams):
+                    cams = []
+            except Exception:
+                pass
         if not quick or not cams:
             self.statusBar().showMessage("Recherche des caméras…")
             QApplicationProcess()
@@ -749,6 +758,10 @@ class MainWindow(QMainWindow):
         try:
             self.home.set_cameras(cams)
         except Exception:
+            pass
+        try:
+            self._fill_pickers()
+        except AttributeError:
             pass
         self.statusBar().showMessage(f"{len(cams)} caméra(s) détectée(s).", 4000)
 
@@ -1105,9 +1118,18 @@ class MainWindow(QMainWindow):
         combo.setMinimumContentsLength(18)
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         combo.setMinimumWidth(240)            # le nom complet de la caméra reste lisible
+        # Liste qui s'ouvre SOUS le bouton (le menu natif du Mac la centrait par-dessus la barre d'affichage)
+        combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
+        combo.setMaxVisibleItems(10)
         combo.activated.connect(lambda _i, slot=slot, combo=combo: self._pick_camera(slot, combo.currentData()))
+        rb = QPushButton("↻")
+        rb.setFixedWidth(36)
+        rb.setToolTip("Rechercher les caméras (iPhone qui vient de se réveiller, webcam branchée…)")
+        rb.setAccessibleName("Rechercher les caméras")
+        rb.clicked.connect(lambda: self._refresh_cameras(quick=False))
         lay.addWidget(lab)
         lay.addWidget(combo)
+        lay.addWidget(rb)
         lay.addStretch(1)
         return row, combo
 

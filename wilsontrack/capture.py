@@ -67,17 +67,30 @@ def list_cameras(max_index: int = 6, backend: str = "DirectShow") -> list[dict]:
         old = None
     try:
         for i in range(max_index):
+            name, phone = f"Caméra {i}", False
+            if mac is not None and i < len(mac):
+                name, phone = mac[i]["name"], mac[i]["phone"]
             cap = cv2.VideoCapture(i, api)
+            fr = None
             if cap is not None and cap.isOpened():
-                ok, fr = cap.read()
-                if ok and fr is not None:
-                    name, phone = f"Caméra {i}", False
-                    if mac is not None and i < len(mac):
-                        name, phone = mac[i]["name"], mac[i]["phone"]
-                    found.append({"index": i, "width": fr.shape[1], "height": fr.shape[0], "phone": phone,
-                                  "name": name, "label": f"{'📱 ' if phone else ''}{name} ({fr.shape[1]}×{fr.shape[0]})"})
+                # Un iPhone (Caméra de continuité) met 2-3 s à se réveiller : on lui laisse du temps.
+                tries = 60 if phone else 8
+                for _ in range(tries):
+                    ok, img = cap.read()
+                    if ok and img is not None and img.size > 0:
+                        fr = img
+                        break
+                    time.sleep(0.05)
             if cap is not None:
                 cap.release()
+            if fr is not None:
+                found.append({"index": i, "width": fr.shape[1], "height": fr.shape[0], "phone": phone,
+                              "name": name, "label": f"{'📱 ' if phone else ''}{name} ({fr.shape[1]}×{fr.shape[0]})"})
+            elif mac is not None:
+                # macOS la voit mais elle n'a pas encore envoyé d'image (iPhone en veille, éloigné…) :
+                # on la propose quand même ; à l'ouverture, la caméra a plus de temps pour démarrer.
+                found.append({"index": i, "width": 1920, "height": 1080, "phone": phone, "name": name,
+                              "label": f"{'📱 ' if phone else ''}{name}"})
     finally:
         if old is not None:
             try:
@@ -185,7 +198,7 @@ class CameraSource(FrameSource):
                 self._seq += 1
                 self._cond.notify_all()
 
-    def _warmup(self, attempts: int = 30):
+    def _warmup(self, attempts: int = 90):     # ≈ 4,5 s max : laisse un iPhone se réveiller
         """Lit quelques images pour laisser la caméra démarrer ; renvoie la première image valide."""
         for _ in range(attempts):
             ok, fr = self.cap.read()
